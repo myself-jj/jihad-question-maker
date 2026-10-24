@@ -45,6 +45,24 @@ function Field({
   );
 }
 
+async function fetchQuestions(imgs: UploadedImage[], params: ExamParams): Promise<MCQ[]> {
+  const res = await fetch("/api/generate-questions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      params,
+      images: imgs.map(({ base64, mimeType }) => ({ base64, mimeType })),
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status === 413) throw new Error("ছবির সাইজ অনেক বেশি। কম ছবি দিয়ে আবার চেষ্টা করুন।");
+    if (res.status === 504) throw new Error("সময় শেষ হয়ে গেছে। কিছুক্ষণ পরে আবার চেষ্টা করুন।");
+    throw new Error(data.error || `অনুরোধ ব্যর্থ হয়েছে (${toBn(res.status)})`);
+  }
+  return data.questions as MCQ[];
+}
+
 export default function Home() {
   const [images, setImages] = React.useState<UploadedImage[]>([]);
   const [form, setForm] = React.useState<ExamParams>(initial);
@@ -64,28 +82,49 @@ export default function Home() {
     const toastId = toast.loading("AI আপনার বইয়ের পাতা পড়ে প্রশ্ন বানাচ্ছে…");
 
     try {
-      const res = await fetch("/api/generate-questions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          params: form,
-          images: images.map(({ base64, mimeType }) => ({ base64, mimeType })),
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        if (res.status === 413) throw new Error("ছবির সাইজ অনেক বেশি। কম ছবি দিয়ে আবার চেষ্টা করুন।");
-        if (res.status === 504) throw new Error("সময় শেষ হয়ে গেছে। কম ছবি দিয়ে আবার চেষ্টা করুন।");
-        throw new Error(data.error || `অনুরোধ ব্যর্থ হয়েছে (${toBn(res.status)})`);
+      // ছবিগুলো ৩টি করে ভাগ করে একসাথে (parallel) পাঠানো হয়, যাতে প্রতিটি অনুরোধ অল্প সময়ে শেষ হয়।
+      const CHUNK = 3;
+      const chunks: UploadedImage[][] = [];
+      for (let i = 0; i < images.length; i += CHUNK) chunks.push(images.slice(i, i + CHUNK));
+      const total = form.numQuestions;
+      const base = Math.floor(total / chunks.length);
+      const extra = total % chunks.length;
+
+      const settled = await Promise.allSettled(
+        chunks.map((chunk, i) => {
+          const n = base + (i < extra ? 1 : 0);
+          return n > 0 ? fetchQuestions(chunk, { ...form, numQuestions: n }) : Promise.resolve([] as MCQ[]);
+        })
+      );
+      const failed = settled.filter((s): s is PromiseRejectedResult => s.status === "rejected");
+
+      const seen = new Set<string>();
+      const questions: MCQ[] = [];
+      for (const s of settled) {
+        if (s.status !== "fulfilled") continue;
+        for (const q of s.value) {
+          const key = q.question.replace(/\s+/g, " ").trim();
+          if (!seen.has(key)) {
+            seen.add(key);
+            questions.push(q);
+          }
+        }
       }
+      if (questions.length === 0) {
+        throw failed[0]?.reason ?? new Error("কোনো প্রশ্ন তৈরি হয়নি। আবার চেষ্টা করুন।");
+      }
+      questions.splice(total);
 
       setStep("PDF তৈরি হচ্ছে…");
       toast.loading("প্রশ্নপত্রের PDF তৈরি হচ্ছে…", { id: toastId });
-      const questions: MCQ[] = data.questions;
       await generateQuestionPaperPdf(form, questions);
 
       toast.success(`প্রশ্নপত্র তৈরি! মোট ${toBn(questions.length)}টি প্রশ্ন।`, { id: toastId });
-      if (data.warning) toast.warning(data.warning);
+      if (failed.length > 0) {
+        toast.warning("কিছু ছবির অংশ প্রক্রিয়া করা যায়নি, তাই প্রশ্ন কম এসেছে। চাইলে আবার চেষ্টা করুন।");
+      } else if (questions.length < total) {
+        toast.warning(`${toBn(total)}টির মধ্যে ${toBn(questions.length)}টি ভালো প্রশ্ন পাওয়া গেছে। আরও পাতা যোগ করে দেখতে পারেন।`);
+      }
     } catch (err: any) {
       toast.error(err.message || "কিছু একটা সমস্যা হয়েছে। আবার চেষ্টা করুন।", { id: toastId });
     } finally {
