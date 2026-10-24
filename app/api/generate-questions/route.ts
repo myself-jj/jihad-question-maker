@@ -52,7 +52,9 @@ export async function POST(req: NextRequest) {
       model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
       systemInstruction: SYSTEM_PROMPT,
       generationConfig: {
-        temperature: 0.4,
+        // Gemini 3.x thinks for a long time by default; "low" keeps responses fast
+        // enough for serverless time limits. (Cast: older SDK typings lack this field.)
+        ...({ thinkingConfig: { thinkingLevel: "low" } } as any),
         responseMimeType: "application/json",
         responseSchema: {
           type: SchemaType.ARRAY,
@@ -72,6 +74,12 @@ export async function POST(req: NextRequest) {
       },
     });
 
+    const part = body.part;
+    const partNote =
+      part && Number.isInteger(part.index) && Number.isInteger(part.total) && part.total > 1
+        ? `\n\nIMPORTANT: This request covers only PART ${part.index + 1} of ${part.total}. Mentally divide the content of the attached page(s) from top to bottom into ${part.total} equal sections and write questions ONLY from section ${part.index + 1}.`
+        : "";
+
     const instruction = `Exam: ${params.examName || "Exam"}
 Class: ${params.className || "-"}
 Subject: ${params.subject || "-"}
@@ -79,7 +87,7 @@ Total marks: ${params.totalMarks || "-"}
 Total time: ${params.totalTime || "-"} minutes
 
 Create EXACTLY ${target} multiple-choice questions from the attached textbook pages.
-Return a JSON array of ${target} objects: { "question": string, "options": [4 strings], "correctIndex": 0-3 }.`;
+Return a JSON array of ${target} objects: { "question": string, "options": [4 strings], "correctIndex": 0-3 }.${partNote}`;
 
     const parts = [
       { text: instruction },
