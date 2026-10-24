@@ -16,7 +16,9 @@ const FOOTER = 16;
 const BODY_W = PAGE_W - PAD * 2;
 const COL_W = Math.floor((BODY_W - GAP * 2 - 1) / 2);
 const LABELS = ["ক", "খ", "গ", "ঘ"];
-const FONT_SIZES = [9, 8.75, 8.5, 8.25, 8, 7.75, 7.5]; // pt
+// Try the largest font first (11pt) and shrink in 0.25pt steps down to 7.5pt,
+// picking the biggest size at which everything fits on ONE page.
+const FONT_SIZES = Array.from({ length: 15 }, (_, i) => 11 - i * 0.25); // pt
 
 function el(tag: string, css = "", text?: string): HTMLElement {
   const e = document.createElement(tag);
@@ -82,6 +84,25 @@ function flow(heights: number[], firstH: number, nextH: number): number[][][] {
     used += h;
   });
   return pages;
+}
+
+/** When everything fits on one page, split into two columns of (nearly) equal height. */
+function balance(heights: number[]): number[][][] {
+  const n = heights.length;
+  const total = heights.reduce((a, b) => a + b, 0);
+  let best = n;
+  let bestMax = Infinity;
+  let left = 0;
+  for (let k = 0; k <= n; k++) {
+    const m = Math.max(left, total - left);
+    if (m < bestMax) {
+      bestMax = m;
+      best = k;
+    }
+    if (k < n) left += heights[k];
+  }
+  const idx = heights.map((_, i) => i);
+  return [[idx.slice(0, best), idx.slice(best)]];
 }
 
 function pageShell(): HTMLElement {
@@ -152,6 +173,7 @@ export async function generateQuestionPaperPdf(exam: ExamParams, questions: MCQ[
     let chosen = FONT_SIZES[FONT_SIZES.length - 1];
     let blocks: HTMLElement[] = [];
     let plan: number[][][] = [];
+    let allHeights: number[] = [];
     for (const pt of FONT_SIZES) {
       const m = el("div", `width:${COL_W}px;font-size:${pt}pt;line-height:1.45;`);
       stage.append(m);
@@ -163,8 +185,10 @@ export async function generateQuestionPaperPdf(exam: ExamParams, questions: MCQ[
       chosen = pt;
       blocks = bs;
       plan = p;
+      allHeights = heights;
       if (p.length === 1) break; // fits on a single page
     }
+    if (plan.length === 1) plan = balance(allHeights);
 
     // 3) build the final pages
     const pages: HTMLElement[] = plan.map((cols, pi) => {
